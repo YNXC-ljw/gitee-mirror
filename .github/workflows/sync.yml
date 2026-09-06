@@ -1,0 +1,25 @@
+name: Gitee 同步到 GitHub
+
+on:
+  schedule:
+    - cron: "0 */6 * * *"
+  workflow_dispatch:
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 同步全部仓库
+        env:
+          PAT: ${{ secrets.GITEE_SYNC_PAT }}
+        run: |
+          set -euo pipefail
+          while IFS='|' read -r gitee_slug github_name; do
+            [ -z "$gitee_slug" ] && continue
+            echo "== 同步 $gitee_slug -> $github_name =="
+            git clone --mirror "https://gitee.com/pengge-student-c-language/${gitee_slug}.git" repo.git
+            git -C repo.git push --mirror "https://x-access-token:${PAT}@github.com/YNXC-ljw/${github_name}.git"
+            rm -rf repo.git
+          done < repos.txt
