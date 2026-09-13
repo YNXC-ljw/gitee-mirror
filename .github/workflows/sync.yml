@@ -32,6 +32,37 @@ jobs:
           PAT: ${{ secrets.GITEE_SYNC_PAT }}
         run: |
           set -uo pipefail
+
+          sync_one() {
+            local gitee_slug="$1" github_name="$2" attempt clone_ok=0 push_ok=0
+            for attempt in 1 2 3; do
+              rm -rf repo.git
+              if git clone --mirror "https://gitee.com/pengge-student-c-language/${gitee_slug}.git" repo.git; then
+                clone_ok=1
+                break
+              fi
+              echo "从 Gitee 拉取失败（第 ${attempt} 次），10 秒后重试"
+              sleep 10
+            done
+            if [ "${clone_ok}" != "1" ]; then
+              echo "::error::${gitee_slug} 从 Gitee 拉取失败"
+              return 1
+            fi
+            for attempt in 1 2 3; do
+              if git -C repo.git push --mirror "https://x-access-token:${PAT}@github.com/YNXC-ljw/${github_name}.git"; then
+                push_ok=1
+                break
+              fi
+              echo "推送到 GitHub 失败（第 ${attempt} 次），10 秒后重试"
+              sleep 10
+            done
+            if [ "${push_ok}" != "1" ]; then
+              echo "::error::${gitee_slug} 推送到 GitHub 失败"
+              return 1
+            fi
+            return 0
+          }
+
           total=0
           ok=0
           failed=""
@@ -40,27 +71,19 @@ jobs:
             github_name="$(printf %s "$github_name" | tr -d "\r")"
             [ -z "$gitee_slug" ] && continue
             total=$((total + 1))
-            echo "::group::$gitee_slug -> $github_name"
-            rm -rf repo.git
-            if ! git clone --mirror "https://gitee.com/pengge-student-c-language/${gitee_slug}.git" repo.git; then
-              echo "::error::$gitee_slug 从 Gitee 拉取失败"
-              failed="$failed $gitee_slug"
-              echo "::endgroup::"
-              continue
-            fi
-            if git -C repo.git push --mirror "https://x-access-token:${PAT}@github.com/YNXC-ljw/${github_name}.git"; then
+            echo "::group::${gitee_slug} -> ${github_name}"
+            if sync_one "$gitee_slug" "$github_name"; then
               ok=$((ok + 1))
-              echo "OK $gitee_slug 同步成功"
+              echo "OK ${gitee_slug} 同步成功"
             else
-              echo "::error::$gitee_slug 推送到 GitHub 失败"
-              failed="$failed $gitee_slug"
+              failed="${failed} ${gitee_slug}"
             fi
             echo "::endgroup::"
           done < repos.txt
           rm -rf repo.git
-          echo "共 $total 个仓库，成功 $ok 个。"
-          if [ -n "$failed" ]; then
-            echo "::error::以下仓库同步失败:$failed"
+          echo "共 ${total} 个仓库，成功 ${ok} 个。"
+          if [ -n "${failed}" ]; then
+            echo "::error::以下仓库同步失败:${failed}"
             exit 1
           fi
 
