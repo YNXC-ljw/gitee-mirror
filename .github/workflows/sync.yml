@@ -1,4 +1,4 @@
-name: Gitee 同步到 GitHub
+name: Gitee <-> GitHub 双向同步
 
 on:
   schedule:
@@ -20,74 +20,25 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: 检查访问令牌
+      - name: 检查令牌
         env:
           PAT: ${{ secrets.GITEE_SYNC_PAT }}
+          GITEE_TOKEN: ${{ secrets.GITEE_TOKEN }}
         run: |
           if [ -z "${PAT:-}" ]; then
-            echo "::error::缺少 GITEE_SYNC_PAT 密文。请在仓库 Settings -> Secrets and variables -> Actions 里添加名为 GITEE_SYNC_PAT 的密文（值是一个勾选了 repo 权限的 GitHub 令牌）。"
+            echo "::error::缺少 GITEE_SYNC_PAT 密文（GitHub 令牌，需要勾选 repo）"
+            exit 1
+          fi
+          if [ -z "${GITEE_TOKEN:-}" ]; then
+            echo "::error::缺少 GITEE_TOKEN 密文（Gitee 私人令牌，需要勾选 projects）"
             exit 1
           fi
 
-      - name: 同步全部仓库
+      - name: 双向同步全部仓库
         env:
           PAT: ${{ secrets.GITEE_SYNC_PAT }}
-        run: |
-          set -uo pipefail
-
-          sync_one() {
-            local gitee_slug="$1" github_name="$2" attempt clone_ok=0 push_ok=0
-            for attempt in 1 2 3; do
-              rm -rf repo.git
-              if git clone --mirror "https://gitee.com/pengge-student-c-language/${gitee_slug}.git" repo.git; then
-                clone_ok=1
-                break
-              fi
-              echo "从 Gitee 拉取失败（第 ${attempt} 次），10 秒后重试"
-              sleep 10
-            done
-            if [ "${clone_ok}" != "1" ]; then
-              echo "::error::${gitee_slug} 从 Gitee 拉取失败"
-              return 1
-            fi
-            for attempt in 1 2 3; do
-              if git -C repo.git push --mirror "https://x-access-token:${PAT}@github.com/YNXC-ljw/${github_name}.git"; then
-                push_ok=1
-                break
-              fi
-              echo "推送到 GitHub 失败（第 ${attempt} 次），10 秒后重试"
-              sleep 10
-            done
-            if [ "${push_ok}" != "1" ]; then
-              echo "::error::${gitee_slug} 推送到 GitHub 失败"
-              return 1
-            fi
-            return 0
-          }
-
-          total=0
-          ok=0
-          failed=""
-          while IFS="|" read -r gitee_slug github_name; do
-            gitee_slug="$(printf %s "$gitee_slug" | tr -d "\r")"
-            github_name="$(printf %s "$github_name" | tr -d "\r")"
-            [ -z "$gitee_slug" ] && continue
-            total=$((total + 1))
-            echo "::group::${gitee_slug} -> ${github_name}"
-            if sync_one "$gitee_slug" "$github_name"; then
-              ok=$((ok + 1))
-              echo "OK ${gitee_slug} 同步成功"
-            else
-              failed="${failed} ${gitee_slug}"
-            fi
-            echo "::endgroup::"
-          done < repos.txt
-          rm -rf repo.git
-          echo "共 ${total} 个仓库，成功 ${ok} 个。"
-          if [ -n "${failed}" ]; then
-            echo "::error::以下仓库同步失败:${failed}"
-            exit 1
-          fi
+          GITEE_TOKEN: ${{ secrets.GITEE_TOKEN }}
+        run: bash sync.sh
 
       - name: 保持定时任务不被休眠（每月一次）
         env:
