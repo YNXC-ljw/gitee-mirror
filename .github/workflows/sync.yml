@@ -26,30 +26,55 @@ jobs:
           PAT: ${{ secrets.GITEE_SYNC_PAT }}
           GITEE_TOKEN: ${{ secrets.GITEE_TOKEN }}
         run: |
+          set +e
           fail() { echo "::error::$1"; exit 1; }
           [ -n "${PAT:-}" ] || fail "缺少 GITEE_SYNC_PAT 密文（GitHub 令牌，需要勾选 repo）"
           [ -n "${GITEE_TOKEN:-}" ] || fail "缺少 GITEE_TOKEN 密文（Gitee 私人令牌，需要勾选 projects）"
 
-          gh_code=$(curl -s -o /tmp/gh.json -w '%{http_code}' -H "Authorization: Bearer ${PAT}" https://api.github.com/user)
-          if [ "$gh_code" != "200" ]; then
-            fail "GitHub 令牌已失效（HTTP ${gh_code}）。请重新生成 GitHub 令牌，并更新密文 GITEE_SYNC_PAT。"
-          fi
+          probe() {
+            local out="$1"; shift
+            local code=""
+            local i
+            for i in 1 2 3 4; do
+              code=$(curl -sS -o "$out" -w '%{http_code}' --max-time 40 --connect-timeout 15 \
+                     --retry 2 --retry-all-errors -H 'User-Agent: codex-sync' "$@" 2>/dev/null)
+              if [ "$code" = "200" ]; then
+                echo "$code"; return 0
+              fi
+              echo "::notice::第 ${i} 次探测没成功（HTTP ${code:-000}），稍后重试" >&2
+              sleep 6
+            done
+            echo "${code:-000}"
+            return 0
+          }
 
-          exp=$(curl -s -D - -o /dev/null -H "Authorization: Bearer ${PAT}" https://api.github.com/user | tr -d '\r' | awk -F': ' 'tolower($1)=="github-authentication-token-expiration"{print $2}')
-          if [ -n "$exp" ]; then
-            echo "GitHub 令牌到期时间：${exp}"
-            exp_s=$(date -d "$exp" +%s 2>/dev/null || echo 0)
+          echo "::notice::开始校验 GitHub 令牌"
+          gh_code=$(probe /tmp/gh.json -H "Authorization: Bearer ${PAT}" https://api.github.com/user)
+          echo "::notice::GitHub 令牌探测结果 HTTP=${gh_code}"
+          if [ "$gh_code" != "200" ]; then
+            fail "GitHub 令牌校验没通过（HTTP ${gh_code}）。如果不是 200，多半是 GitHub 令牌过期或被删了，请重新生成后更新密文 GITEE_SYNC_PAT。"
+          fi
+          echo "GitHub 令牌有效。"
+
+          hdr=$(curl -sS -D - -o /dev/null --max-time 40 --connect-timeout 15 -H 'User-Agent: codex-sync' \
+                -H "Authorization: Bearer ${PAT}" https://api.github.com/user 2>/dev/null \
+                | tr -d '\r' | awk -F': ' 'tolower($1)=="github-authentication-token-expiration"{print $2}')
+          if [ -n "$hdr" ]; then
+            echo "::notice::GitHub 令牌到期时间 ${hdr}"
+            exp_s=$(date -d "$hdr" +%s 2>/dev/null || echo 0)
             now_s=$(date +%s)
             if [ "$exp_s" != "0" ] && [ $((exp_s - now_s)) -lt 604800 ]; then
-              echo "::warning::GitHub 令牌还有不到 7 天就到期了（${exp}），请尽快重新生成并更新密文 GITEE_SYNC_PAT。"
+              echo "::warning::GitHub 令牌还有不到 7 天就到期了（${hdr}），请尽快重新生成并更新密文 GITEE_SYNC_PAT。"
             fi
           fi
 
-          gt_code=$(curl -s -o /tmp/gt.json -w '%{http_code}' "https://gitee.com/api/v5/user?access_token=${GITEE_TOKEN}")
+          echo "::notice::开始校验 Gitee 令牌"
+          gt_code=$(probe /tmp/gt.json "https://gitee.com/api/v5/user?access_token=${GITEE_TOKEN}")
+          echo "::notice::Gitee 令牌探测结果 HTTP=${gt_code}"
           if [ "$gt_code" != "200" ]; then
-            fail "Gitee 令牌已失效（HTTP ${gt_code}）。请重新生成 Gitee 私人令牌，并更新密文 GITEE_TOKEN。"
+            fail "Gitee 令牌校验没通过（HTTP ${gt_code}）。如果不是 200，多半是 Gitee 令牌过期或被删了，请重新生成后更新密文 GITEE_TOKEN。"
           fi
-          echo "两个令牌都有效。"
+          echo "Gitee 令牌有效。"
 
       - name: 双向同步全部仓库
         env:
