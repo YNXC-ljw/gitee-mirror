@@ -7,6 +7,7 @@ on:
 
 permissions:
   contents: read
+  issues: write
 
 concurrency:
   group: gitee-sync
@@ -20,19 +21,35 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: 检查令牌
+      - name: 检查并验证两个令牌
         env:
           PAT: ${{ secrets.GITEE_SYNC_PAT }}
           GITEE_TOKEN: ${{ secrets.GITEE_TOKEN }}
         run: |
-          if [ -z "${PAT:-}" ]; then
-            echo "::error::缺少 GITEE_SYNC_PAT 密文（GitHub 令牌，需要勾选 repo）"
-            exit 1
+          fail() { echo "::error::$1"; exit 1; }
+          [ -n "${PAT:-}" ] || fail "缺少 GITEE_SYNC_PAT 密文（GitHub 令牌，需要勾选 repo）"
+          [ -n "${GITEE_TOKEN:-}" ] || fail "缺少 GITEE_TOKEN 密文（Gitee 私人令牌，需要勾选 projects）"
+
+          gh_code=$(curl -s -o /tmp/gh.json -w '%{http_code}' -H "Authorization: Bearer ${PAT}" https://api.github.com/user)
+          if [ "$gh_code" != "200" ]; then
+            fail "GitHub 令牌已失效（HTTP ${gh_code}）。请重新生成 GitHub 令牌，并更新密文 GITEE_SYNC_PAT。"
           fi
-          if [ -z "${GITEE_TOKEN:-}" ]; then
-            echo "::error::缺少 GITEE_TOKEN 密文（Gitee 私人令牌，需要勾选 projects）"
-            exit 1
+
+          exp=$(curl -s -D - -o /dev/null -H "Authorization: Bearer ${PAT}" https://api.github.com/user | tr -d '\r' | awk -F': ' 'tolower($1)=="github-authentication-token-expiration"{print $2}')
+          if [ -n "$exp" ]; then
+            echo "GitHub 令牌到期时间：${exp}"
+            exp_s=$(date -d "$exp" +%s 2>/dev/null || echo 0)
+            now_s=$(date +%s)
+            if [ "$exp_s" != "0" ] && [ $((exp_s - now_s)) -lt 604800 ]; then
+              echo "::warning::GitHub 令牌还有不到 7 天就到期了（${exp}），请尽快重新生成并更新密文 GITEE_SYNC_PAT。"
+            fi
           fi
+
+          gt_code=$(curl -s -o /tmp/gt.json -w '%{http_code}' "https://gitee.com/api/v5/user?access_token=${GITEE_TOKEN}")
+          if [ "$gt_code" != "200" ]; then
+            fail "Gitee 令牌已失效（HTTP ${gt_code}）。请重新生成 Gitee 私人令牌，并更新密文 GITEE_TOKEN。"
+          fi
+          echo "两个令牌都有效。"
 
       - name: 双向同步全部仓库
         env:
@@ -56,3 +73,31 @@ jobs:
           git add heartbeat.txt
           git commit -m "chore: 定时任务续期"
           git push "https://x-access-token:${PAT}@github.com/YNXC-ljw/gitee-mirror.git" HEAD:main
+
+      - name: 同步失败时开一个提醒 Issue
+        if: failure()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          link="https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+          body="自动同步任务**失败了**，需要处理。
+
+          - 运行记录：$link
+          - 时间：$(date -u +'%Y-%m-%d %H:%M UTC')
+
+          最常见原因：Gitee 私人令牌或 GitHub 令牌失效（过期或被删）。上面「检查并验证两个令牌」那一步会直接指出是哪个令牌的问题。"
+          num=$(gh issue list --repo "$GITHUB_REPOSITORY" --state open --search '同步失败 in:title' --json number --jq '.[0].number // empty')
+          if [ -n "$num" ]; then
+            gh issue comment "$num" --repo "$GITHUB_REPOSITORY" --body "$body"
+          else
+            gh issue create --repo "$GITHUB_REPOSITORY" --title "⚠️ Gitee 自动同步失败，需要处理" --body "$body"
+          fi
+
+      - name: 同步恢复正常时自动关闭提醒
+        if: success()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          for n in $(gh issue list --repo "$GITHUB_REPOSITORY" --state open --search '同步失败 in:title' --json number --jq '.[].number'); do
+            gh issue close "$n" --repo "$GITHUB_REPOSITORY" --comment "本轮同步已经成功，自动关闭。"
+          done
