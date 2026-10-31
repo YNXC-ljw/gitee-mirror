@@ -76,6 +76,8 @@ jobs:
             fail "Gitee 令牌校验没通过（HTTP ${gt_code}）。如果不是 200，多半是 Gitee 令牌过期或被删了，请重新生成后更新密文 GITEE_TOKEN。"
           fi
           echo "Gitee 令牌有效。"
+          gt_login=$(jq -r '.login // empty' /tmp/gt.json 2>/dev/null || true)
+          echo "::notice::Gitee 令牌对应账号：${gt_login:-未知}"
 
       - name: 双向同步全部仓库
         env:
