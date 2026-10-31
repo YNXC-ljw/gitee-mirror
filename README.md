@@ -36,4 +36,4 @@
 
 ## 仓库对照表
 
-见 [`repos.txt`](repos.txt)，一行一个仓库，格式 `Gitee路径|GitHub仓库名`。在 Gitee 新建了仓库就在这里加一行，同时在 GitHub 建一个同名仓库。
+见 [`repos.txt`](repos.txt)，一行一个仓库，格式 `Gitee路径|GitHub仓库名`。新增仓库时在这里加一行即可；如果 Gitee 尚无对应仓库，下一次同步会自动创建一个同路径的公开仓库。

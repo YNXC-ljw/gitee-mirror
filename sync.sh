@@ -59,6 +59,52 @@ remote_heads() {
   return 1
 }
 
+# 对照表里新增了仓库时，如果 Gitee 还没有，就自动创建公开仓库。
+# 返回：0=仓库可用（原本存在或刚创建），1=创建/检查失败
+ensure_gitee_repo() {
+  local slug="$1"
+  local name="$2"
+  local api="https://gitee.com/api/v5/repos/${GITEE_USER}/${slug}"
+  local code=""
+  local i
+
+  for i in $(seq 1 "$RETRY"); do
+    code=$(curl -sS -o /dev/null -w '%{http_code}' --max-time 40 \
+      -H 'User-Agent: codex-sync' "${api}?access_token=${GITEE_TOKEN}" 2>/dev/null)
+    [ "$code" = "200" ] && return 0
+    [ "$code" = "404" ] && break
+    echo "   检查 Gitee 仓库时 HTTP ${code:-000}，第 ${i} 次失败"
+    sleep 5
+  done
+
+  if [ "$code" != "404" ]; then
+    echo "::error::${slug}：无法确认 Gitee 仓库状态（HTTP ${code:-000}）"
+    return 1
+  fi
+
+  echo "-- Gitee 还没有 ${slug}，自动创建公开仓库"
+  for i in $(seq 1 "$RETRY"); do
+    code=$(curl -sS -o /tmp/gitee-create.json -w '%{http_code}' --max-time 60 \
+      -X POST \
+      -H 'User-Agent: codex-sync' \
+      --data-urlencode "access_token=${GITEE_TOKEN}" \
+      --data-urlencode "name=${name}" \
+      --data-urlencode "path=${slug}" \
+      --data-urlencode "private=false" \
+      --data-urlencode "auto_init=false" \
+      "https://gitee.com/api/v5/user/repos" 2>/dev/null)
+    if [ "$code" = "201" ] || [ "$code" = "200" ]; then
+      echo "   Gitee 仓库创建成功"
+      sleep 3
+      return 0
+    fi
+    echo "   创建 Gitee 仓库 HTTP ${code:-000}，第 ${i} 次失败"
+    sleep 5
+  done
+  echo "::error::${slug}：Gitee 仓库自动创建失败（HTTP ${code:-000}）"
+  return 1
+}
+
 failed=""
 total=0
 ok=0
@@ -92,10 +138,18 @@ while IFS="|" read -r slug name; do
     continue
   fi
   if ! gt_heads=$(remote_heads "$gurl"); then
-    echo "::error::${slug}：读不到 Gitee 的分支列表（Gitee 连不上或令牌失效）"
-    failed="${failed} ${slug}"
-    echo "::endgroup::"
-    continue
+    if ! ensure_gitee_repo "$slug" "$name"; then
+      echo "::error::${slug}：读不到 Gitee 的分支列表，且无法自动建仓"
+      failed="${failed} ${slug}"
+      echo "::endgroup::"
+      continue
+    fi
+    if ! gt_heads=$(remote_heads "$gurl"); then
+      echo "::error::${slug}：Gitee 仓库刚创建，但读取分支失败"
+      failed="${failed} ${slug}"
+      echo "::endgroup::"
+      continue
+    fi
   fi
   if [ "$gh_heads" = "$gt_heads" ]; then
     echo "两边分支完全一致，跳过（不下载）"
