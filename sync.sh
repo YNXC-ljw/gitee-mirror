@@ -94,9 +94,17 @@ ensure_gitee_repo() {
       --data-urlencode "auto_init=false" \
       "https://gitee.com/api/v5/user/repos" 2>/dev/null)
     if [ "$code" = "201" ] || [ "$code" = "200" ]; then
-      echo "   Gitee 仓库创建成功"
+      created_full_name=$(jq -r '.full_name // empty' /tmp/gitee-create.json 2>/dev/null || true)
+      created_private=$(jq -r '.private // empty' /tmp/gitee-create.json 2>/dev/null || true)
+      echo "   Gitee 仓库创建成功：${created_full_name:-未知路径}（private=${created_private:-未知}）"
       sleep 3
-      return 0
+      code=$(curl -sS -o /dev/null -w '%{http_code}' --max-time 40 \
+        -H 'User-Agent: codex-sync' "${api}?access_token=${GITEE_TOKEN}" 2>/dev/null)
+      if [ "$code" = "200" ]; then
+        return 0
+      fi
+      echo "::error::${slug}：仓库接口创建成功，但按对照表路径读取仍为 HTTP ${code:-000}"
+      return 1
     fi
     echo "   创建 Gitee 仓库 HTTP ${code:-000}，第 ${i} 次失败"
     sleep 5
