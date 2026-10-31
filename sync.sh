@@ -69,9 +69,31 @@ ensure_gitee_repo() {
   local i
 
   for i in $(seq 1 "$RETRY"); do
-    code=$(curl -sS -o /dev/null -w '%{http_code}' --max-time 40 \
+    code=$(curl -sS -o /tmp/gitee-check.json -w '%{http_code}' --max-time 40 \
       -H 'User-Agent: codex-sync' "${api}?access_token=${GITEE_TOKEN}" 2>/dev/null)
-    [ "$code" = "200" ] && return 0
+    if [ "$code" = "200" ]; then
+      repo_private=$(jq -r '.private // false' /tmp/gitee-check.json 2>/dev/null || echo false)
+      if [ "$repo_private" = "true" ]; then
+        echo "-- ${slug} 当前为私有，改成公开以匹配 GitHub 镜像"
+        code=$(curl -sS -o /tmp/gitee-update.json -w '%{http_code}' --max-time 60 \
+          -X PATCH \
+          -H 'User-Agent: codex-sync' \
+          -H 'Content-Type: application/json' \
+          -d '{"private":false}' \
+          "${api}?access_token=${GITEE_TOKEN}" 2>/dev/null)
+        if [ "$code" != "200" ]; then
+          echo "::error::${slug}：修改 Gitee 仓库可见性失败（HTTP ${code:-000}）"
+          return 1
+        fi
+      fi
+      code=$(curl -sS -o /dev/null -w '%{http_code}' --max-time 40 \
+        -H 'User-Agent: codex-sync' "$api" 2>/dev/null)
+      if [ "$code" = "200" ]; then
+        return 0
+      fi
+      echo "::error::${slug}：Gitee 仓库无法公开访问（HTTP ${code:-000}）"
+      return 1
+    fi
     [ "$code" = "404" ] && break
     echo "   检查 Gitee 仓库时 HTTP ${code:-000}，第 ${i} 次失败"
     sleep 5
@@ -90,7 +112,6 @@ ensure_gitee_repo() {
       --data-urlencode "access_token=${GITEE_TOKEN}" \
       --data-urlencode "name=${name}" \
       --data-urlencode "path=${slug}" \
-      --data-urlencode "private=false" \
       --data-urlencode "auto_init=false" \
       "https://gitee.com/api/v5/user/repos" 2>/dev/null)
     if [ "$code" = "201" ] || [ "$code" = "200" ]; then
@@ -98,12 +119,24 @@ ensure_gitee_repo() {
       created_private=$(jq -r '.private // empty' /tmp/gitee-create.json 2>/dev/null || true)
       echo "   Gitee 仓库创建成功：${created_full_name:-未知路径}（private=${created_private:-未知}）"
       sleep 3
+      if [ "$created_private" = "true" ]; then
+        code=$(curl -sS -o /tmp/gitee-update.json -w '%{http_code}' --max-time 60 \
+          -X PATCH \
+          -H 'User-Agent: codex-sync' \
+          -H 'Content-Type: application/json' \
+          -d '{"private":false}' \
+          "${api}?access_token=${GITEE_TOKEN}" 2>/dev/null)
+        if [ "$code" != "200" ]; then
+          echo "::error::${slug}：新仓库创建后改成公开失败（HTTP ${code:-000}）"
+          return 1
+        fi
+      fi
       code=$(curl -sS -o /dev/null -w '%{http_code}' --max-time 40 \
-        -H 'User-Agent: codex-sync' "${api}?access_token=${GITEE_TOKEN}" 2>/dev/null)
+        -H 'User-Agent: codex-sync' "$api" 2>/dev/null)
       if [ "$code" = "200" ]; then
         return 0
       fi
-      echo "::error::${slug}：仓库接口创建成功，但按对照表路径读取仍为 HTTP ${code:-000}"
+      echo "::error::${slug}：仓库创建后仍无法公开访问（HTTP ${code:-000}）"
       return 1
     fi
     echo "   创建 Gitee 仓库 HTTP ${code:-000}，第 ${i} 次失败"
@@ -138,6 +171,13 @@ while IFS="|" read -r slug name; do
   hurl="${GH_BASE:-https://x-access-token:${GH_PAT}@github.com/${GH_USER}}/${name}.git"
   repo_ok=1
 
+  if ! ensure_gitee_repo "$slug" "$name"; then
+    echo "::error::${slug}：Gitee 仓库不可用"
+    failed="${failed} ${slug}"
+    echo "::endgroup::"
+    continue
+  fi
+
   # 先用最轻量的方式比对两边的分支，完全一致就不下载了（大仓库能省很多时间）
   if ! gh_heads=$(remote_heads "$hurl"); then
     echo "::error::${slug}：读不到 GitHub 的分支列表（网络问题）"
@@ -146,18 +186,10 @@ while IFS="|" read -r slug name; do
     continue
   fi
   if ! gt_heads=$(remote_heads "$gurl"); then
-    if ! ensure_gitee_repo "$slug" "$name"; then
-      echo "::error::${slug}：读不到 Gitee 的分支列表，且无法自动建仓"
-      failed="${failed} ${slug}"
-      echo "::endgroup::"
-      continue
-    fi
-    if ! gt_heads=$(remote_heads "$gurl"); then
-      echo "::error::${slug}：Gitee 仓库刚创建，但读取分支失败"
-      failed="${failed} ${slug}"
-      echo "::endgroup::"
-      continue
-    fi
+    echo "::error::${slug}：读不到 Gitee 的分支列表（Gitee 连不上或令牌失效）"
+    failed="${failed} ${slug}"
+    echo "::endgroup::"
+    continue
   fi
   if [ "$gh_heads" = "$gt_heads" ]; then
     echo "两边分支完全一致，跳过（不下载）"
