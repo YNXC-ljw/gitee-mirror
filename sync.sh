@@ -59,6 +59,34 @@ remote_heads() {
   return 1
 }
 
+make_gitee_repo_public() {
+  local slug="$1"
+  local name="$2"
+  local api="https://gitee.com/api/v5/repos/${GITEE_USER}/${slug}"
+  local payload
+  local code=""
+  local i
+  local error_message=""
+
+  payload=$(jq -nc --arg name "$name" --arg slug "$slug" \
+    '{name:$name,path:$slug,private:false}')
+  for i in $(seq 1 "$RETRY"); do
+    code=$(curl -sS -o /tmp/gitee-update.json -w '%{http_code}' --max-time 60 \
+      -X PATCH \
+      -H 'User-Agent: codex-sync' \
+      -H 'Content-Type: application/json' \
+      -d "$payload" \
+      "${api}?access_token=${GITEE_TOKEN}" 2>/dev/null)
+    if [ "$code" = "200" ]; then
+      return 0
+    fi
+    error_message=$(jq -r '.message // .error // empty' /tmp/gitee-update.json 2>/dev/null || true)
+    echo "   修改 Gitee 仓库可见性 HTTP ${code:-000}，第 ${i} 次失败${error_message:+：${error_message}}"
+    sleep 5
+  done
+  return 1
+}
+
 # 对照表里新增了仓库时，如果 Gitee 还没有，就自动创建公开仓库。
 # 返回：0=仓库可用（原本存在或刚创建），1=创建/检查失败
 ensure_gitee_repo() {
@@ -75,14 +103,8 @@ ensure_gitee_repo() {
       repo_private=$(jq -r '.private // false' /tmp/gitee-check.json 2>/dev/null || echo false)
       if [ "$repo_private" = "true" ]; then
         echo "-- ${slug} 当前为私有，改成公开以匹配 GitHub 镜像"
-        code=$(curl -sS -o /tmp/gitee-update.json -w '%{http_code}' --max-time 60 \
-          -X PATCH \
-          -H 'User-Agent: codex-sync' \
-          -H 'Content-Type: application/json' \
-          -d '{"private":false}' \
-          "${api}?access_token=${GITEE_TOKEN}" 2>/dev/null)
-        if [ "$code" != "200" ]; then
-          echo "::error::${slug}：修改 Gitee 仓库可见性失败（HTTP ${code:-000}）"
+        if ! make_gitee_repo_public "$slug" "$name"; then
+          echo "::error::${slug}：修改 Gitee 仓库可见性失败"
           return 1
         fi
       fi
@@ -120,14 +142,8 @@ ensure_gitee_repo() {
       echo "   Gitee 仓库创建成功：${created_full_name:-未知路径}（private=${created_private:-未知}）"
       sleep 3
       if [ "$created_private" = "true" ]; then
-        code=$(curl -sS -o /tmp/gitee-update.json -w '%{http_code}' --max-time 60 \
-          -X PATCH \
-          -H 'User-Agent: codex-sync' \
-          -H 'Content-Type: application/json' \
-          -d '{"private":false}' \
-          "${api}?access_token=${GITEE_TOKEN}" 2>/dev/null)
-        if [ "$code" != "200" ]; then
-          echo "::error::${slug}：新仓库创建后改成公开失败（HTTP ${code:-000}）"
+        if ! make_gitee_repo_public "$slug" "$name"; then
+          echo "::error::${slug}：新仓库创建后改成公开失败"
           return 1
         fi
       fi
